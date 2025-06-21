@@ -40,10 +40,13 @@ setInterval(() => {
 }, 3600 * 1000); // Every hour
 
 const PORT: number = parseInt(process.env.PORT || '3000', 10);
-const WS_URL: string = process.env.WS_URL || `ws://localhost:${PORT}`;
+const IS_PROD = process.env.NODE_ENV === 'production';
+const BASE_URL = (IS_PROD ? process.env.RENDER_EXTERNAL_URL : `http://localhost:${PORT}`) || '';
+const WS_URL = BASE_URL.replace(/^http/, 'ws');
+
 app.set('wsUrl', WS_URL);
-app.set('baseUrl', process.env.BASE_URL || `http://localhost:${PORT}`);
+app.set('baseUrl', BASE_URL);
 
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on ${BASE_URL}`);
 });
