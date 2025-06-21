@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RealTimeTranslator - Room</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+  </style>
+</head>
+<body class="bg-gray-100">
+  <div class="container mx-auto text-center">
+    <h1 class="text-2xl font-bold mb-4">RealTimeTranslator</h1>
+    <p><strong>Room ID:</strong> <span id="roomId">None</span></p>
+    <p id="roomLink" class="mb-2"><strong>Share Link:</strong> <span id="roomLinkText">None</span> <button id="copyLinkBtn" class="bg-green-500 text-white rounded hover:bg-green-600 p-1 ml-2 hidden">Copy</button></p>
+    <p><strong>Connected Users:</strong> <span id="connectedUsers">None</span></p>
+    <div class="mb-4">
+      <span id="offerModeDisplay" class="mr-2">Offer Mode: <span id="offerModeText">Unknown</span></span>
+      <select id="offerMode" class="border p-2 rounded hidden">
+        <option value="auto">Automatic</option>
+        <option value="manual">Manual</option>
+      </select>
+      <button id="muteBtn" class="bg-gray-500 text-white rounded hover:bg-gray-600 p-2 ml-2">Mute Audio</button>
+      <button id="leaveBtn" class="bg-red-500 text-white rounded hover:bg-red-600 p-2 ml-2">Leave Call</button>
+    </div>
+    <div id="manualControls" class="mb-4 hidden"></div>
+    <p id="status" class="text-gray-700 mb-4">Status: Connected</p>
+    <div>
+      <label>Remote Audio:</label>
+      <div id="remoteAudioContainer"></div>
+    </div>
+  </div>
+
+  <script>
+    window.onload = () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomId = urlParams.get('roomId');
+      const userId = urlParams.get('userId');
+      const adminId = urlParams.get('adminId');
+      const roomLink = urlParams.get('roomLink');
+      const roomIdSpan = document.getElementById('roomId');
+      const roomLinkText = document.getElementById('roomLinkText');
+      const copyLinkBtn = document.getElementById('copyLinkBtn');
+      const connectedUsers = document.getElementById('connectedUsers');
+      const status = document.getElementById('status');
+      const remoteAudioContainer = document.getElementById('remoteAudioContainer');
+      const offerModeSelect = document.getElementById('offerMode');
+      const offerModeText = document.getElementById('offerModeText');
+      const offerModeDisplay = document.getElementById('offerModeDisplay');
+      const muteBtn = document.getElementById('muteBtn');
+      const leaveBtn = document.getElementById('leaveBtn');
+      const manualControls = document.getElementById('manualControls');
+
+      let ws, peerConnections = {}, localStream, isMuted = false, isAdmin = false, offerMode = localStorage.getItem('offerMode') || 'auto';
+
+      if (!roomId || !userId) {
+        status.textContent = 'Status: Invalid room or user ID';
+        window.location.href = '/';
+        return;
+      }
+
+      roomIdSpan.textContent = roomId;
+      isAdmin = userId === adminId;
+      if (isAdmin && roomLink) {
+        roomLinkText.textContent = decodeURIComponent(roomLink);
+        copyLinkBtn.classList.remove('hidden');
+      }
+      offerModeText.textContent = offerMode;
+      offerModeSelect.value = offerMode;
+      offerModeSelect.classList.toggle('hidden', !isAdmin);
+      offerModeDisplay.classList.toggle('hidden', isAdmin);
+      manualControls.classList.toggle('hidden', offerMode === 'auto' || !isAdmin);
+
+      copyLinkBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(decodeURIComponent(roomLink)).then(() => {
+          status.textContent = 'Status: Link copied!';
+          setTimeout(() => status.textContent = 'Status: Connected', 2000);
+        }).catch(() => {
+          status.textContent = 'Status: Failed to copy link';
+        });
+      });
+
+      async function fetchRoomDetails() {
+        try {
+          const res = await fetch(`/api/room/${roomId}`);
+          if (!res.ok) throw new Error('Failed to fetch room');
+          const { adminId: serverAdminId, users, offerMode: serverOfferMode } = await res.json();
+          if (!isAdmin && userId === serverAdminId) {
+            isAdmin = true;
+            offerModeSelect.classList.remove('hidden');
+            offerModeDisplay.classList.add('hidden');
+          }
+          offerMode = serverOfferMode || offerMode;
+          localStorage.setItem('offerMode', offerMode);
+          offerModeText.textContent = offerMode;
+          offerModeSelect.value = offerMode;
+          manualControls.classList.toggle('hidden', offerMode === 'auto' || !isAdmin);
+          connectedUsers.textContent = users.map(u => u.username).join(', ') || 'None';
+          setTimeout(fetchRoomDetails, 5000);
+        } catch (error) {
+          console.error('Fetch room error:', error);
+        }
+      }
+
+      offerModeSelect.addEventListener('change', () => {
+        if (isAdmin) {
+          const newMode = offerModeSelect.value;
+          offerMode = newMode;
+          localStorage.setItem('offerMode', offerMode);
+          offerModeText.textContent = offerMode;
+          manualControls.classList.toggle('hidden', offerMode === 'auto');
+          ws.send(JSON.stringify({ roomId, userId, type: 'set-offer-mode', payload: { offerMode: newMode } }));
+        }
+      });
+
+      async function startWebRTC() {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true }
+          });
+          ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+          ws.onopen = () => {
+            status.textContent = 'Status: Connected to signaling server';
+            ws.send(JSON.stringify({ type: 'reconnect', roomId, userId }));
+            fetchRoomDetails();
+          };
+          ws.onmessage = (event) => {
+            try {
+              const { type, payload, from, roomId: msgRoomId, error } = JSON.parse(event.data);
+              console.log(`Received ${type} from ${from} in room ${msgRoomId}`);
+              if (error) {
+                status.textContent = `Status: Error - ${error}`;
+                return;
+              }
+              if (type === 'offer-mode-updated') {
+                offerMode = payload.offerMode;
+                localStorage.setItem('offerMode', offerMode);
+                offerModeText.textContent = offerMode;
+                offerModeSelect.value = offerMode;
+                manualControls.classList.toggle('hidden', offerMode === 'auto' || !isAdmin);
+                return;
+              }
+              handleSignalingMessage(type, payload, from, msgRoomId);
+            } catch (err) {
+              console.error('WebSocket message error:', err);
+              status.textContent = 'Status: Error - Invalid server response';
+            }
+          };
+          ws.onclose = () => {
+            status.textContent = 'Status: WebSocket disconnected';
+            leaveCall();
+          };
+          ws.onerror = (e) => {
+            console.error('WebSocket error:', e);
+            status.textContent = 'Status: WebSocket connection failed';
+          };
+        } catch (error) {
+          status.textContent = `Status: Media error - ${error.message}`;
+        }
+      }
+
+      async function handleSignalingMessage(type, payload, from, msgRoomId) {
+        if (type === 'new-user' && isAdmin && offerMode === 'manual') {
+          const { newUserId, username } = payload;
+          const button = document.createElement('button');
+          button.textContent = `Approve ${username} (${newUserId})`;
+          button.className = 'bg-blue-500 text-white rounded hover:bg-blue-600 p-2 m-1';
+          button.onclick = () => {
+            ws.send(JSON.stringify({ roomId, userId, type: 'manual-accept', payload: {}, to: newUserId }));
+            button.remove();
+          };
+          manualControls.appendChild(button);
+          manualControls.classList.remove('hidden');
+        } else if (type === 'initiate-offer' && isAdmin) {
+          await createManualOffer(payload.newUserId);
+        } else if (type === 'create-offer') {
+          await createOffer(payload.newUserId);
+        } else if (type === 'manual-offer') {
+          await acceptManualOffer(from, payload);
+        } else if (type === 'offer') {
+          const pc = createPeerConnection(from);
+          await pc.setRemoteDescription(payload);
+          localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ roomId, userId, type: 'answer', payload: pc.localDescription, to: from }));
+        } else if (type === 'answer') {
+          await peerConnections[from].setRemoteDescription(payload);
+        } else if (type === 'ice-candidate') {
+          await peerConnections[from].addIceCandidate(payload);
+        } else if (type === 'user-left') {
+          const { userId: leftUserId } = payload;
+          if (peerConnections[leftUserId]) {
+            peerConnections[leftUserId].close();
+            delete peerConnections[leftUserId];
+            const remoteAudio = document.getElementById(`remoteAudio_${leftUserId}`);
+            if (remoteAudio) {
+              remoteAudio.remove();
+            }
+            const buttons = manualControls.querySelectorAll(`button`);
+            buttons.forEach(btn => {
+              if (btn.textContent.includes(leftUserId)) {
+                btn.remove();
+              }
+            });
+          }
+        }
+      }
+
+      function createPeerConnection(targetUserId) {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        peerConnections[targetUserId] = pc;
+
+        pc.ontrack = (e) => {
+          let remoteAudio = document.getElementById(`remoteAudio_${targetUserId}`);
+          if (!remoteAudio) {
+            remoteAudio = document.createElement('audio');
+            remoteAudio.id = `remoteAudio_${targetUserId}`;
+            remoteAudio.autoplay = true;
+            remoteAudio.controls = true;
+            remoteAudio.playsInline = true;
+            remoteAudioContainer.appendChild(remoteAudio);
+          }
+          const stream = e.streams[0];
+          if (remoteAudio.srcObject !== stream) {
+            remoteAudio.srcObject = stream;
+            remoteAudio.play().catch(error => {
+              console.error(`Autoplay failed for user ${targetUserId}:`, error);
+              status.textContent = 'Status: Browser blocked audio. Click play on the audio player.';
+            });
+          }
+        };
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            ws.send(JSON.stringify({ roomId, userId, type: 'ice-candidate', payload: e.candidate, to: targetUserId }));
+          }
+        };
+        pc.oniceconnectionstatechange = () => {
+          console.log(`ICE state for ${targetUserId}: ${pc.iceConnectionState}`);
+          if (pc.iceConnectionState === 'failed') {
+            status.textContent = 'Status: Connection failed. Try a different network.';
+          }
+        };
+
+        return pc;
+      }
+
+      async function createOffer(targetUserId) {
+        const pc = createPeerConnection(targetUserId);
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ roomId, userId, type: 'offer', payload: pc.localDescription, to: targetUserId }));
+      }
+
+      async function createManualOffer(newUserId) {
+        const pc = createPeerConnection(newUserId);
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ roomId, userId, type: 'manual-offer', payload: pc.localDescription, to: newUserId }));
+      }
+
+      async function acceptManualOffer(from, sdp) {
+        const pc = createPeerConnection(from);
+        await pc.setRemoteDescription(sdp);
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ roomId, userId, type: 'answer', payload: pc.localDescription, to: from }));
+      }
+
+      function leaveCall() {
+        if (ws) ws.close();
+        for (const userId in peerConnections) {
+          if (peerConnections[userId]) {
+            peerConnections[userId].close();
+          }
+        }
+        peerConnections = {};
+        if (localStream) {
+          localStream.getTracks().forEach(track => track.stop());
+        }
+        window.location.href = '/';
+      }
+
+      function toggleMute() {
+        if (!localStream) return;
+        isMuted = !isMuted;
+        localStream.getAudioTracks()[0].enabled = !isMuted;
+        muteBtn.textContent = isMuted ? 'Unmute Audio' : 'Mute Audio';
+      }
+
+      muteBtn.addEventListener('click', toggleMute);
+      leaveBtn.addEventListener('click', leaveCall);
+
+      startWebRTC();
+    };
+  </script>
+</body>
+</html>

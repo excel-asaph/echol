@@ -1,0 +1,26 @@
+{
+  "name": "echol",
+  "version": "2.0.0",
+  "description": "Real-time audio chat with WebRTC",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/server.js",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.17.0",
+    "uuid": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.17",
+    "@types/node": "^20.3.1",
+    "@types/uuid": "^9.0.2",
+    "@types/ws": "^8.5.5",
+    "@typescript-eslint/eslint-plugin": "^5.59.11",
+    "@typescript-eslint/parser": "^5.59.11",
+    "eslint": "^8.42.0",
+    "typescript": "^5.1.3"
+  }
+}
